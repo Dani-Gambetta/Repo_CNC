@@ -1,0 +1,174 @@
+'*************************************************************************************************************
+'******************************* Y Axis (POSITIVE SIDE) Touch Script For Mach3 R3.043  ***********************
+'******FONT*********************     For Both INCH And MM Units | Rev13 July/2022      ***********************
+'*********Courier***************                CHARLIE SARSFIELD                      ***********************
+'*******************************         www.YouTube.com/sunny5rising                  ***********************
+'*******************************             sunny5rise@gmail.com                      ***********************
+'*************************************************************************************************************
+'***************** NOTES:                                                                   ******************
+'*****************   To use DEFAULT probe & gage values, set relevant DRO(s) to Zero        ******************
+'*****************   To use a gage value of ZERO, enter a Negative value in THICKNESS DRO.  ******************
+'*************************************************************************************************************
+'*************************************************************************************************************
+'********************    TEST SCRIPT CAUTIOUSLY  ******  USE SCRIPT AT YOUR OWN RISK   ***********************
+'*************************************************************************************************************
+'*************************************************************************************************************
+'********************         To Support My Work: http://PayPal.Me/CharlieCNC          ***********************
+'*************************************************************************************************************
+
+'----- USER VARIABLES FOR DISTANCES, FEED RATES, AND OPTIONS -------------------------------------------------
+If GetParam("Units") = 0 Then
+ 'METRIC VALUES
+ VarMaxDistance = 25.4      'MAX TRAVEL
+ VarFeedRate = 127          'MM/MIN APPROACH FEEDRATE
+ VarStandOff = 1.27         'STANDOFF DISTANCE
+ VarProbeDia = 3.175        'DEFAULT PROBE DIAMETER | EDGE FINDER DIA. DRO PRECEDENCE
+ VarGageThick = 0.091       'DEFAULT GAGE THICKNESS | GAGE THICKNESS DRO PRECEDENCE
+Else
+ 'SAE VALUES
+ VarMaxDistance = 1.0       'MAX TRAVEL
+ VarFeedRate = 5            'INCH/MIN APPROACH FEEDRATE
+ VarStandOff = 0.05         'STANDOFF DISTANCE
+ VarProbeDia = 0.125        'DEFAULT PROBE DIAMETER | EDGE FINDER DIA. DRO PRECEDENCE
+ VarGageThick = 0.0036      'DEFAULT GAGE THICKNESS | GAGE THICKNESS DRO PRECEDENCE
+End If
+
+VarDelayInSec = 0           'DEFAULT SECONDS TO DELAY MOTION
+VarBeepOrSpeak = 2          'COUNTDOWN AUDIO: 0=NONE 1=BEEP 2=SPEAK 
+VarSecOfAudio = 5           'SECOND AT WHICH AUDIO BEGINS
+
+VarCompleteAudio = 3        'END SIGNAL: 0=NONE 1=Beep 2=SPEAK 3=WAV_AUDIO_FILE
+VarWavAudioFile = "C:\MACH3\ToolCompleteSND1.wav"     'AUDIO FILE & PATH
+
+'*************************************************************************************************************
+'*************************************************************************************************************
+
+'----- GET INITIAL ENVIRONMENT SETTINGS FOR LATER REINSTATEMENT ----------------------------------------------
+VarInitialDistMode = GetOemLED(48)           'DISTANCE MODE G90/G91
+VarInitialLinearMode = GetOemDRO(819)        'LINEAR MODE  G00/G01
+VarInitialFeedRate = GetOemDRO(818)          'FEEDRATE
+VarInitialInhibit = GetParam("ZInhibitOn")   'Z INHIBIT STATUS  OFF/ON
+VarInitialYScale = GetParam("YScale")        'Y SCALE VALUE
+VarInitialFRO = GetOemDRO(821)               'FEEDRATE OVERRIDE PERCENTAGE
+Message ""     'CLEAR STATUS LINE TEXT
+
+'----- CHECK DIGITIZE STATE; 0=CLEAR 1=ACTIVE ----------------------------------------------------------------
+If GetOemLED (825) <> 0 Then
+ RET = MachMsg("Digitize Status Not Clear. Check Probe/Connections And Try Again!","*** ERROR! ***",0)
+ Message "Edge Find CANCELED"     'DISPLAY MESSAGE
+ End     'END SCRIPT
+End If
+
+'----- RETRIEVE PROBE DIAMETER AND GAGE THICKNESS ------------------------------------------------------------
+If VarProbeDia = 0 And GetOEMDRO(1000) = 0 Then
+ RET = MachMsg("Coffee First, Then Provide Probe Diameter And Try Again.","*** ERROR! ***",0)
+ Message "Edge Find CANCELED"     'DISPLAY MESSAGE
+ Sleep 2000 : Message ""
+ End     'END SCRIPT
+Else
+ If GetOEMDRO(1000) <> 0 Then VarProbeDia = Abs(GetOEMDRO(1000))   'CHECK AND GET FINDER DIA DRO VALUE IF USED
+End If
+
+If GetOEMDRO(1001) <> 0 Then     'CHECK FOR GAGE THICKNESS VALUE
+ Select Case InStr(1,GetOEMDRO(1001),"-")     'CHECK IF NEGATIVE IS USED
+  Case 0     'NEG NOT PRESENT
+    VarGageThick = Abs(GetOEMDRO(1001))     'SET GAGE THICKNESS TO DRO VALUE
+  Case 1     'NEG IS PRESENT
+    VarGageThick = 0     'SET GAGE THICKNESS TO ZERO
+ End Select
+End If
+Select Case GetParam("Units")     'SET UNITS FOR STATUS LINE DISPLAY
+ Case 0     'MM
+  VarMsgUnits = "mm"
+ Case 1     'INCH
+  VarMsgUnits = "in"
+End Select
+'FORMAT STATUS LINE TEXT
+VarStatusMsg = "Probe: " &VarProbeDia &VarMsgUnits &"   Gage: " &VarGageThick &VarMsgUnits
+
+'----- ACTIVATE TIME DELAY IF USED ---------------------------------------------------------------------------
+VarDelayInSec = Abs(VarDelayInSec)
+If VarDelayInSec <> 0 Then
+ Do Until VarDelayInSec = 0     'LOOP UNTIL SECONDS = ZERO
+  Message VarDelayInSec         'DISPLAY SECONDS VALUE IN STATUS LINE
+   If VarDelayInSec < VarSecOfAudio + 1 Then
+    Select Case VarBeepOrSpeak
+     Case 1     'OPTION BEEP
+      Beep
+     Case 2     'OPTION SPEAK
+      Speak(VarDelayInSec)
+    End Select
+   End If
+  Sleep 1000     'PAUSE 1 SEC.
+  VarDelayInSec = VarDelayInSec - 1	'REDUCE SECONDS BY 1 AFTER EACH LOOP
+ Loop
+End If
+
+'----- CANCEL SCALE, FEEDRATE OVERRIDE, Z-INHIBIT ------------------------------------------------------------
+SetParam("YScale",1.0)     'SET Y SCALE TO 1.0
+DoOemButton(1014)          'CANCEL FEED OVERRIDE
+SetParam("ZInhibitOn",0)   'TURN Z INHIBIT OFF
+
+'----- MOVE PROBE TOWARD CONTACT -----------------------------------------------------------------------------
+SetOemDRO(801,0)     'ZERO Y AXIS DRO
+Sleep 200            'DELAY TO ALLOW DRO TO CHANGE
+Message VarStatusMsg &"     Y Zero Running..."
+Code "G91 G31 Y-" &VarMaxDistance &"F" &VarFeedRate     '*MOVE IN Y NEG DIRECTION
+ While IsMoving()     'WAIT UNTIL MOVE IS COMPLETE BEFORE PROCEEDING
+  Wend
+
+'----- GET CONTACT POSITION AND TEST FOR MAX TRAVEL ------ MOVE TO STANDOFF ------ UPDATE Y AXIS DRO ---------
+If GetOemDRO(801) <= ("-" &VarMaxDistance - .001) Then
+ RET = MachMsg("Maximum Travel Reached. Reposition Y Axis Closer To Part And Try Again!","*** OOPS! ***",0)
+ Message ""
+ RETURNSTATE     'CALL REINSTATE SUBROUTINE
+ End     'END SCRIPT
+Else
+ Beep
+ SetOemDRO(801,0)     'ZERO Y AXIS DRO
+ Sleep 500
+ Code "G91 G1 Y+" &VarStandOff &"F" &VarFeedRate*2     '*MOVE TO STANDOFF DISTANCE
+  While IsMoving ()
+   Wend
+ Sleep 500
+  '***
+ VCATCH=(VarStandOff + VarGageThick + (VarProbeDia/2))     '***
+ SetOemDRO(801,VCATCH) 'SET Y DRO  ***
+ Sleep 500
+  Select Case VarCompleteAudio
+   Case 1     'OPTION BEEP
+    Beep
+   Case 2     'OPTION SPEAK
+    Speak("Tool Zero Complete.")
+   Case 3     'OPTION WAV_AUDIO_FILE
+    PlayWave(VarWavAudioFile)
+  End Select
+ Message VarStatusMsg &"     Y Tool Zero Complete!"
+End If
+RETURNSTATE     'CALL REINSTATE SUBROUTINE
+End     'SCRIPT COMPLETE
+
+'******************************************* SUBROUTINE BELOW ************************************************
+
+'----- SUBROUTINE TO RETURN INITIAL SETTINGS -----------------------------------------------------------------
+Sub RETURNSTATE
+ 'REINSTATE INITIAL FEEDRATE
+ Code "F" &VarInitialFeedRate
+ 
+ 'REINSTATE DISTANCE MODE  0=G91  -1=G90
+ If VarInitialDistMode = 0 Then Code "G91" Else Code "G90"
+ 
+ 'REINSTATE LINEAR MODE  0=G00  1=G01
+ If VarInitialLinearMode = 0 Then Code "G00" Else Code "G01"
+
+ 'REINSTATE Z INHIBIT STATUS 0=OFF 1=ON
+ If VarInitialInhibit = 1 Then SetParam("ZInhibitOn",1)
+
+ 'SET Y SCALE TO INITIAL VALUE
+ If VarInitialYScale <> 1.0 Then SetParam("YScale",VarInitialYScale)
+
+ 'SET FEEDRATE OVERRIDE TO INITIAL VALUE
+ If VarInitialFRO <> 100 Then SetOemDRO(821,VarInitialFRO)
+End Sub     
+
+'*************************************************************************************************************

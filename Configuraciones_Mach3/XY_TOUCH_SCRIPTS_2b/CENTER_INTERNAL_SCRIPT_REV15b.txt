@@ -1,0 +1,359 @@
+'*************************************************************************************************************
+'*****************************           Find X/Y Center (INTERNAL)                ***************************
+'*****************************         A Touch Script For Mach3 R3.043             ***************************
+'******FONT*******************    For Both INCH And MM Units | Rev15b Oct/2022     ***************************
+'*********Courier*************               CHARLIE SARSFIELD                     ***************************
+'*****************************          www.YouTube.com/sunny5rising               ***************************
+'*****************************              sunny5rise@gmail.com                   ***************************
+'*************************************************************************************************************
+'*****************  NOTES BEFORE LAUNCHING:                                                *******************
+'*****************   Z Axis of probe MUST be placed BELOW top surface.                     *******************
+'*****************   To use DEFAULT probe & gage values, set relevant DRO(s) to Zero       *******************
+'*****************   To use a gage value of ZERO, enter a Negative value in THICKNESS DRO. *******************
+'*************************************************************************************************************
+'********************    TEST SCRIPT CAUTIOUSLY  ******  USE SCRIPT AT YOUR OWN RISK   ***********************
+'*************************************************************************************************************
+'*************************************************************************************************************
+'********************         To Support My Work: http://PayPal.Me/CharlieCNC          ***********************
+'*************************************************************************************************************
+
+'----- USER VARIABLES ----------------------------------------------------------------------------------------
+If GetParam("Units") = 0 Then
+ 'METRIC VALUES
+ VarUnits = "  MM"
+ VarMaxXDistance = 147.32     'X-AXIS MAX TRAVEL BEFORE ALARM
+ VarMaxYDistance = 223.52     'Y-AXIS MAX TRAVEL BEFORE ALARM
+ VarFeedRate = 127            'MM/MIN APPROACH FEEDRATE
+ VarProbeDia = 3.175          'DEFAULT PROBE DIAMETER | EDGE FINDER DIA. DRO PRECEDENCE
+ VarGageThick = 0             'DEFAULT GAGE THICKNESS | GAGE THICKNESS DRO PRECEDENCE
+Else
+ 'SAE VALUES
+ VarUnits = " INCH"
+ VarMaxXDistance = 5.8        'X-AXIS MAX TRAVEL BEFORE ALARM
+ VarMaxYDistance = 8.8        'Y-AXIS MAX TRAVEL BEFORE ALARM
+ VarFeedRate = 5              'INCH/MIN APPROACH FEEDRATE 
+ VarProbeDia = 0.125          'DEFAULT PROBE DIAMETER | EDGE FINDER DIA. DRO PRECEDENCE
+ VarGageThick = 0             'DEFAULT GAGE THICKNESS | GAGE THICKNESS DRO PRECEDENCE
+End If
+
+VarRateOrRapid = 1            'DEFAULT POSITIONING MOVEMENT: 0=SAFETY RATE (FEEDRATE * 2)  1=RAPID
+VarWhichAxis = 0              'DEFAULT AXIS CHOICE: 0=BOTH  1=X  2=Y
+VarAxisFlip = 0               'DEFAULT SWITCH AXIS ORDER FOR "BOTH" (X/Y TO Y/X) 0=NO  1=YES
+VarIsCircle = 0               'DEFAULT "IS CIRCLE" (RUN TWICE FOR ROUND HOLES) 0=OFF  1=ON 
+
+VarDelayInSec = 0             'DEFAULT SECONDS TO DELAY MOTION
+VarBeepOrSpeak = 2            'COUNTDOWN AUDIO: 0=NONE 1=BEEP 2=SPEAK 
+VarSecOfAudio = 5             'COUNTDOWN SECOND AT WHICH AUDIO BEGINS
+
+VarCompleteAudio = 3          'END SIGNAL: 0=NONE 1=BEEP 2=SPEAK 3=WAV_AUDIO_FILE
+VarWavAudioFile = "C:\MACH3\ToolCompleteSND1.wav"     'AUDIO FILE & PATH
+
+'*************************************************************************************************************
+'*************************************************************************************************************
+
+'----- GET INITIAL ENVIRONMENT SETTINGS FOR LATER REINSTATEMENT ----------------------------------------------
+VarInitialLinearMode = GetOemDRO(819)        'LINEAR MODE  G00/G01
+VarInitialDistMode = GetOemLED(48)           'DISTANCE MODE G90/G91    
+VarInitialFeedRate = GetOemDRO(818)          'FEEDRATE
+VarInitialInhibit = GetParam("ZInhibitOn")   'Z INHIBIT STATUS  OFF/ON
+VarInitialXScale = GetParam("XScale")        'X SCALE VALUE
+VarInitialYScale = GetParam("YScale")        'Y SCALE VALUE
+VarInitialFRO = GetOemDRO(821)               'FEEDRATE OVERRIDE PERCENTAGE
+Message ""     'CLEAR STATUS LINE TEXT
+
+'----- CHECK DIGITIZE STATE; 0=CLEAR 1=ACTIVE ----------------------------------------------------------------
+If GetOemLED (825) <> 0 Then 
+ RET = MachMsg("Digitize Status Not Clear. Check Probe/Connections And Try Again!","*** ERROR! ***",0)
+ End     'END SCRIPT
+End If
+
+'----- RETRIEVE PROBE DIAMETER AND GAGE THICKNESS ------------------------------------------------------------
+If VarProbeDia = 0 And GetOEMDRO(1000) = 0 Then
+ RET = MachMsg("Coffee First, Then Provide Probe Diameter And Try Again.","*** ERROR! ***",0)
+ Message "Center Find CANCELED"   'DISPLAY MESSAGE
+ End     'END SCRIPT
+Else
+ If GetOEMDRO(1000) <> 0 Then VarProbeDia = Abs(GetOEMDRO(1000))     'CHECK AND GET FINDER DIA DRO VALUE IF USED
+End If
+
+If GetOEMDRO(1001) <> 0 Then     'CHECK FOR GAGE THICKNESS VALUE
+ Select Case InStr(1,GetOEMDRO(1001),"-")     'CHECK IF NEGATIVE IS USED
+  Case 0     'NEG NOT PRESENT
+    VarGageThick = Abs(GetOEMDRO(1001))	   'SET GAGE THICKNESS TO DRO VALUE
+  Case 1     'NEG IS PRESENT
+    VarGageThick = 0     'SET GAGE THICKNESS TO ZERO
+ End Select         
+End If
+Select Case GetParam("Units")     'SET UNITS FOR STATUS LINE DISPLAY
+ Case 0     'MM
+  VarMsgUnits = "mm"   
+ Case 1     'INCH
+  VarMsgUnits = "in"
+End Select
+'FORMAT STATUS LINE TEXT
+VarStatusMsg = "Probe: " &VarProbeDia &VarMsgUnits &"   Gage: " &VarGageThick &VarMsgUnits
+
+'----- RUN DIALOG SUBROUTINE ---------------------------------------------------------------------------------
+RunTheThing
+
+'----- ACTIVATE TIME DELAY IF USED ---------------------------------------------------------------------------
+If VarDelayInSec <> 0 Then COUNTDOWN
+
+'----- CANCEL SCALE, FEEDRATE OVERRIDE, Z INHIBIT ------------------------------------------------------------
+SetParam("XScale",1.0)     'SET X SCALE TO 1.0
+SetParam("YScale",1.0)     'SET Y SCALE TO 1.0
+SetParam("ZInhibitOn",0)   'TURN Z INHIBIT OFF
+DoOemButton(1014)          'CANCEL FEED OVERRIDE
+
+'----- SET POSITIONING SETTINGS ------------------------------------------------------------------------------
+VarSafetyRate = "F" &VarFeedRate * 2     'SETUP SAFETY POSITIONING FEEDRATE
+If VarRateOrRapid = 0 Then VarLinearMode = "G1" Else VarLinearMode = "G0"     'SETUP LINEAR MODE
+
+'----- CALL SUBROUTINES BASED ON DIALOG SELECTION ------------------------------------------------------------
+Select Case VarWhichAxis
+ Case 0     'BOTH
+  If VarAxisFlip = 0 Then     'RUN X/Y
+    RunXCenter
+    RunYCenter
+    If VarIsCircle = 1 Then RunXCenter : RunYCenter     'RUN SET AGAIN
+  Else     'RUN Y/X
+    RunYCenter
+    RunXCenter
+    If VarIsCircle = 1 Then RunYCenter : RunXCenter     'RUN SET AGAIN
+  End If
+ Case 1     'X
+  RunXCenter
+ Case 2     'Y
+  RunYCenter
+End Select
+
+'----- REINSTATE ----- RUN END AUDIO ----- DISPLAY SPAN -----------------------------------------------------
+RETURNSTATE     'CALL REINSTATE SUBROUTINE
+Select Case VarCompleteAudio     'PLAY SELECTED END AUDIO
+ Case 1     'OPTION BEEP
+  Beep
+ Case 2     'OPTION SPEAK
+  Speak("Tool Zero Complete.")
+ Case 3     'OPTION WAV_AUDIO_FILE
+  PlayWave(VarWavAudioFile)
+End Select
+Sleep 500     'DELAY 1/2 SEC
+Select Case VarWhichAxis     'DISPLAY SPECS FOR RELEVANT AXIS/AXES 
+ Case 0	 'BOTH
+    Select Case GetParam("Units")    'SET INFORMATION FOR STATUS LINE DISPLAY
+     Case 0     'MM
+      VarSpanDia = Format((CDbl(VarSpanX) + CDbl(VarSpanY))/2,"##0.000")   'CALCULATE MM DIAMETER
+      VarSpanDiff = Format(CDbl(VarSpanX) - CDbl(VarSpanY),"##0.000")      'CALCULATE SPAN DIFFERENCE
+     Case 1  'INCH
+      VarSpanDia = Format((CDbl(VarSpanX) + CDbl(VarSpanY))/2,"##0.0000")  'CALCULATE INCH DIAMETER
+      VarSpanDiff = Format(CDbl(VarSpanX) - CDbl(VarSpanY),"##0.0000")     'CALCULATE SPAN DIFFERENCE
+    End Select
+  If VarIsCircle = 1 Then
+   Message VarStatusMsg &"     Diameter: " &VarSpanDia &"   Diff: " &Abs(VarSpanDiff)     'STATUS MSG CIRCLE
+  Else
+   Message VarStatusMsg &"     X Span:" &VarSpanX &"   Y Span:" &VarSpanY     'STATUS MSG X/Y OR Y/X
+  End If
+ Case 1     'X
+  Message VarStatusMsg &"     X Span:" &VarSpanX     'STATUS MSG X
+ Case 2     'Y
+  Message VarStatusMsg &"     Y Span:" &VarSpanY     'STATUS MSG Y
+End Select
+End     'SCRIPT RUN COMPLETE
+
+'******************************************* SUBROUTINES BELOW ***********************************************
+
+'----- DIALOG SUBROUTINE FOR AXIS CHOICE ---------------------------------------------------------------------
+Sub RunTheThing
+
+ Dim UnitList$ (0)     'DECLARE 1 ITEM ARRAY FOR UNIT LISTBOX
+  UnitList (0) = VarUnits     'FILL ARRAY 1
+
+ 'SETUP DIALOG CONTROLS
+ Begin Dialog AxisChoice 110,71,"Find Center (Internal)", .EnableIt
+  ListBox 63,23,25,10, UnitList$(),.Listbox1
+  GroupBox 8,5,95,53,"Choose Axis",.GroupBox1
+  OptionGroup .grp1 
+   OptionButton 15, 12, 38, 10, "X / Y  ----",.Opt0 
+   OptionButton 15, 22, 30, 10, "X Axis",.Opt1 	
+   OptionButton 15, 32, 30, 10, "Y Axis",.Opt2
+  CheckBox 1,13,7,7,"",. Chk1
+  CheckBox 58,13,37,9, "Is Circle", .Chk2
+  Text 24.3,13,30,10,"Y / X  ----",.txt1 
+  OKButton 56,34,37,12
+  Text 13,59,100,15, "Delay" 
+  TextBox 36,59,30,10, .SecText
+  Text 70,59,30,15, "Seconds"
+  CheckBox 19,47,70,10, "Rapid Positioning", .Check1          
+ End Dialog
+
+ Dim Dlg1 As AxisChoice
+ 'SET DIALOG CONTROLS BASED ON DEFAULT OPTION SETTINGS
+ Dlg1.grp1 = VarWhichAxis      'DEFAULT AXIS
+ Dlg1.Chk2 = VarIsCircle       'DEFAULT "IS CIRCLE" STATE
+ Dlg1.Check1 = VarRateOrRapid  'DEFAULT "RATE/RAPID" STATE
+ Dlg1.SecText = VarDelayInSec  'FILL SECONDS TEXTBOX WITH DEFAULT VALUE
+ Dlg1.Chk1 = VarAxisFlip       'DEFAULT "AXIS FLIP" STATE
+ Message VarStatusMsg     'SHOW STATUS MESSAGE OF PROBE/GAGE
+ Button = Dialog (Dlg1)   'SHOW DIALOG AND WAIT FOR BUTTON REPLY
+
+ If Button = 0 Then     'IF CLOSE BUTTON
+  Message "Find Center CANCELED"'DISPLAY MESSAGE
+  End     'END SCRIPT
+ End If	
+
+ 'CHECK THAT SECONDS WAS ENTERED NUMERIC
+ If IsNumeric(Dlg1.SecText) = True Then
+  VarDelayInSec = Int(Dlg1.SecText)
+ Else
+  RET = MachMsg("*****  SECONDS MUST BE ENTERED IN NUMERIC FORMAT! *****", _
+  "  Stronger Coffee Is Recommended  ",0)
+  RunTheThing     'RESTART SUB
+ End If
+
+ VarWhichAxis = Dlg1.grp1     'GET AXIS OPTION CHOICE 0=BOTH  1=X  2=Y
+ VarAxisFlip = Dlg1.Chk1      'GET AXIS FLIP CHOICE
+ VarIsCircle = Dlg1.Chk2      'GET IS CIRCLE OPTION 
+ VarRateOrRapid = Dlg1.Check1 'GET POSITIONING MODE 0=SAFETYRATE  1=RAPID
+ End Sub
+
+'----- DIALOG FUNCTION TO ENABLE/DISABLE CONTROLS ------------------------------------------------------------
+Function EnableIt( ControlID$, Action%, SuppValue%) 
+ Select Case Action%
+  Case 1     'SETTINGS FOR DIALOG START
+   If VarWhichAxis = 0 Then DlgEnable "Chk2",1 Else DlgEnable "Chk2",0
+   If VarWhichAxis = 0 Then DlgEnable "Chk1",1 Else DlgEnable "Chk1",0
+   If VarAxisFlip = 1 Then DlgVisible "txt1",1 Else DlgVisible "txt1",0
+  Case 2     'TOGGLE SETTINGS BASED ON WHICH CONTROL IS CLICKED
+  If ControlID$ = "Opt0" Then DlgEnable "Chk1",1 : DlgEnable "Chk2",1
+  If ControlID$ = "Opt1" Then DlgEnable "Chk1",0 : DlgEnable "Chk2",0
+  If ControlID$ = "Opt2" Then DlgEnable "Chk1",0 : DlgEnable "Chk2",0
+  If ControlID$ = "Chk1" Then DlgVisible "txt1"
+ End Select
+End Function
+ 
+'----- SUBROUTINE FOR COUNTDOWN DELAY ------------------------------------------------------------------------
+Sub COUNTDOWN
+ VarDelayInSec = Abs(VarDelayInSec)
+ Do Until VarDelayInSec = 0     'LOOP UNTIL SECONDS = ZERO 
+  Message VarStatusMsg &"     Delay: " &VarDelayInSec     'DISPLAY SECONDS VALUE IN STATUS LINE
+   If VarDelayInSec < VarSecOfAudio + 1 Then
+    Select Case VarBeepOrSpeak
+     Case 1     'OPTION BEEP
+      Beep
+     Case 2     'OPTION SPEAK 
+      Speak(VarDelayInSec)
+    End Select
+   End If
+  Sleep 1000     'PAUSE 1 SEC.
+  VarDelayInSec = VarDelayInSec - 1     'REDUCE SECONDS BY 1 AFTER EACH LOOP
+ Loop
+End Sub
+
+'----- SUBROUTINE TO RETURN INITIAL SETTINGS -----------------------------------------------------------------
+Sub RETURNSTATE
+ 'REINSTATE INITIAL FEEDRATE
+ Code "F" &VarInitialFeedRate
+
+ 'REINSTATE DISTANCE MODE  0=G91  -1=G90
+ If VarInitialDistMode = 0 Then Code "G91" Else Code "G90"
+ 
+ 'REINSTATE LINEAR MODE  0=G00  1=G01
+ If VarInitialLinearMode = 0 Then Code "G00" Else Code "G01"
+
+ 'REINSTATE Z INHIBIT STATUS 0=OFF 1=ON
+ If VarInitialInhibit = 1 Then SetParam("ZInhibitOn",1)
+
+ 'SET X SCALE TO INITIAL VALUE
+ If VarInitialXScale <> 1.0 Then SetParam("XScale",VarInitialXScale)
+
+ 'SET Y SCALE TO INITIAL VALUE
+ If VarInitialYScale <> 1.0 Then SetParam("YScale",VarInitialYScale)
+
+ 'SET FEEDRATE OVERRIDE TO INITIAL VALUE
+ If VarInitialFRO <> 100 Then SetOemDRO(821,VarInitialFRO)
+End Sub 
+
+'----- X AXIS SUBROUTINE -------------------------------------------------------------------------------------
+Sub RunXCenter
+ '----- MOVE PROBE TOWARD CONTACT 
+ SetOemDRO(800,0)     'ZERO X AXIS DRO
+ Sleep 200     'DELAY TO ALLOW DRO TO CHANGE
+ Message VarStatusMsg &"     X Center Running..."
+ Code "G91 G31 X" &VarMaxXDistance &"F" &VarFeedRate     '*MOVE IN X POS DIRECTION
+  While IsMoving()     'WAIT UNTIL MOVE IS COMPLETE BEFORE PROCEEDING
+   Wend
+ If GetOemDRO(800) >= (VarMaxXDistance - .001) Then     'TEST FOR MAX TRAVEL
+  RET = MachMsg("Maximum Travel Reached. Reposition X Axis Closer To Part And Try Again!","*** OOPS! ***",0)
+  Message ""
+  RETURNSTATE     'CALL REINSTATE SUBROUTINE
+  End     'END SCRIPT
+ Else
+  Beep
+  VarXPosPosition = GetOemDRO(800)     'CAPTURE X POSITIVE HIT
+  Code "G90" &VarLinearMode &"X0" &VarSafetyRate     '*MOVE TO START POINT
+   While IsMoving ()
+    Wend
+  Code "G91 G31 X-" &VarMaxXDistance &"F" &VarFeedRate     '*MOVE IN X NEG DIRECTION
+   While IsMoving()     'WAIT UNTIL MOVE IS COMPLETE BEFORE PROCEEDING
+    Wend
+  Beep
+  VarXNegPosition = GetOemDRO(800)     'CAPTURE X NEGATIVE HIT
+  SetOemDRO(800,0)     'ZERO X AXIS DRO
+  Sleep 200     'DELAY TO ALLOW DRO TO CHANGE
+  VarSubt = (VarXPosPosition - VarXNegPosition)/2     'CALCULATE CENTER
+  Code "G90" &VarLinearMode &"X" &VarSubt &VarSafetyRate     '*MOVE TO CENTER
+   While IsMoving()
+    Wend
+  Select Case GetParam("Units")     'SET INFORMATION FOR STATUS LINE DISPLAY
+   Case 0     'MM
+    VarSpanX = Format(VarProbeDia+(VarGageThick*2)+(VarXPosPosition-VarXNegPosition),"##0.000")     'CALC SPAN
+   Case 1     'INCH
+    VarSpanX = Format(VarProbeDia+(VarGageThick*2)+(VarXPosPosition-VarXNegPosition),"##0.0000")     'CALC SPAN
+  End Select
+  SetOemDRO(800,0)     'ZERO X AXIS DRO
+  Sleep 200     'DELAY TO ALLOW DRO TO CHANGE
+ End If
+End Sub
+
+'----- Y AXIS SUBROUTINE -------------------------------------------------------------------------------------
+Sub RunYCenter
+ '----- MOVE PROBE TOWARD CONTACT 
+ SetOemDRO(801,0)     'ZERO Y AXIS DRO
+ Sleep 200     'DELAY TO ALLOW DRO TO CHANGE
+ Message VarStatusMsg &"     Y Center Running..."
+ Code "G91 G31 Y" &VarMaxYDistance &"F" &VarFeedRate     '*MOVE IN Y POS DIRECTION
+  While IsMoving()     'WAIT UNTIL MOVE IS COMPLETE BEFORE PROCEEDING
+   Wend
+ If GetOemDRO(801) >= (VarMaxYDistance - .001) Then     'TEST FOR MAX TRAVEL
+  RET = MachMsg("Maximum Travel Reached. Reposition Y Axis Closer To Part And Try Again!","*** OOPS! ***",0)
+  Message ""
+  RETURNSTATE     'CALL REINSTATE SUBROUTINE
+  End     'END SCRIPT
+ Else
+  Beep
+  VarYPosPosition = GetOemDRO(801)     'CAPTURE Y POSITIVE HIT
+  Code "G90" &VarLinearMode &"Y0" &VarSafetyRate     '*MOVE TO START POINT
+   While IsMoving ()
+    Wend
+  Code "G91 G31 Y-" &VarMaxYDistance &"F" &VarFeedRate     '*MOVE IN Y NEG DIRECTION
+   While IsMoving()     'WAIT UNTIL MOVE IS COMPLETE BEFORE PROCEEDING
+    Wend
+  Beep
+  VarYNegPosition = GetOemDRO(801)     'CAPTURE Y NEGATIVE HIT
+  SetOemDRO(801,0)     'ZERO Y AXIS DRO
+  Sleep 200     'DELAY TO ALLOW DRO TO CHANGE
+  VarSubt = (VarYPosPosition - VarYNegPosition)/2     'CALCULATE CENTER
+  Code "G90" &VarLinearMode &"Y" &VarSubt &VarSafetyRate     '*MOVE TO CENTER
+   While IsMoving()
+    Wend
+  Select Case GetParam("Units")     'SET INFORMATION FOR STATUS LINE DISPLAY
+   Case 0     'MM
+    VarSpanY = Format(VarProbeDia+(VarGageThick*2)+(VarYPosPosition-VarYNegPosition),"###0.000")     'CALC SPAN
+   Case 1     'INCH
+    VarSpanY = Format(VarProbeDia+(VarGageThick*2)+(VarYPosPosition-VarYNegPosition),"##0.0000")     'CALC SPAN
+  End Select
+  SetOemDRO(801,0)     'ZERO Y AXIS DRO
+  Sleep 200     'DELAY TO ALLOW DRO TO CHANGE
+ End If
+End Sub
+'************************************************************************************************************* 
